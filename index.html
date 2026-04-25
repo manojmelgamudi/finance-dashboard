@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FinTracker - Personal Debt Manager</title>
+    <!-- React and Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: #020617; /* slate-950 */
+            color: #f1f5f9; /* slate-100 */
+            margin: 0; padding: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .animate-slide-up { animation: slideUp 0.4s ease-out forwards; }
+        .modal-overlay { 
+            backdrop-filter: blur(12px); 
+            -webkit-backdrop-filter: blur(12px); 
+            background-color: rgba(0,0,0,0.7); 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow-y: auto;
+            padding: 20px;
+            position: fixed;
+            inset: 0;
+            z-index: 50;
+        }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; border: 2px solid #0f172a; }
+        
+        input, textarea, select { font-size: 16px !important; }
+        
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(51, 65, 85, 0.5);
+        }
+        
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
+
+        .modal-container {
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+        }
+        .modal-body {
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+        
+        const Icon = ({ name, size = 20, className = "" }) => {
+            const ref = useRef(null);
+            useEffect(() => {
+                const renderIcon = () => {
+                    if (ref.current && window.lucide) {
+                        ref.current.innerHTML = '';
+                        const icon = window.lucide.icons[name];
+                        if (icon) {
+                            const svg = window.lucide.createElement(icon);
+                            svg.setAttribute('width', size);
+                            svg.setAttribute('height', size);
+                            if (className) className.split(' ').forEach(cls => cls && svg.classList.add(cls));
+                            ref.current.appendChild(svg);
+                        }
+                    }
+                };
+                renderIcon();
+                if (!window.lucide) {
+                    const timer = setInterval(() => {
+                        if (window.lucide) {
+                            renderIcon();
+                            clearInterval(timer);
+                        }
+                    }, 200);
+                    return () => clearInterval(timer);
+                }
+            }, [name, size, className]);
+            return <span ref={ref} className={`inline-flex items-center justify-center ${className}`} style={{width: size, height: size}} />;
+        };
+
+        const calculateLoanStats = (loan) => {
+            const paidAmount = (loan.payments || []).reduce((acc, p) => acc + p.amount, 0);
+            const remaining = Math.max(0, loan.amount - paidAmount);
+            const progress = Math.min((paidAmount / loan.amount) * 100, 100);
+            const isPaid = remaining <= 0.01; 
+            let emiInfo = null;
+            if (loan.isEmi) {
+                const monthlyAmount = loan.customEmiAmount || (loan.amount / (loan.installments || 12));
+                emiInfo = { monthly: parseFloat(monthlyAmount).toFixed(2), paidCount: (loan.payments || []).length, totalCount: loan.installments || 12 };
+            }
+            return { paidAmount, remaining, progress, isPaid, emiInfo };
+        };
+
+        const getEMISchedule = (loan) => {
+            if (!loan.isEmi) return [];
+            const schedule = [];
+            const startDate = new Date(loan.date);
+            const today = new Date();
+            const currentMonthYear = new Date(today.getFullYear(), today.getMonth(), 1);
+            const targetEmi = parseFloat(loan.customEmiAmount || (loan.amount / (loan.installments || 12)));
+
+            for (let i = 0; i < (loan.installments || 12); i++) {
+                const emiMonthDate = new Date(startDate);
+                emiMonthDate.setMonth(startDate.getMonth() + i);
+                const emiMonthStart = new Date(emiMonthDate.getFullYear(), emiMonthDate.getMonth(), 1);
+                const monthName = emiMonthDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+                const paymentsForMonth = (loan.payments || []).filter(p => p.monthIndex === i);
+                const totalPaidForMonth = paymentsForMonth.reduce((sum, p) => sum + p.amount, 0);
+                let status = 'upcoming';
+                if (totalPaidForMonth >= targetEmi - 0.01) status = 'paid';
+                else if (totalPaidForMonth > 0) status = 'partial';
+                else if (emiMonthStart <= currentMonthYear) status = 'pending';
+                schedule.push({ index: i, monthName, totalPaid: totalPaidForMonth, targetAmount: targetEmi, status });
+            }
+            return schedule;
+        };
+
+        const App = () => {
+            const CURRENCY = "₹";
+            
+            const [debts, setDebts] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('fintracker_v5_local');
+                    return saved ? JSON.parse(saved) : [];
+                } catch (e) { return []; }
+            });
+
+            const [view, setView] = useState('list'); 
+            const [selectedDebtId, setSelectedDebtId] = useState(null);
+            const [selectedLoanId, setSelectedLoanId] = useState(null);
+            const [searchTerm, setSearchTerm] = useState('');
+            const [activeTab, setActiveTab] = useState('receivable');
+            
+            const [showAddDebt, setShowAddDebt] = useState(false);
+            const [showAddLoan, setShowAddLoan] = useState(false);
+            const [showAddPayment, setShowAddPayment] = useState(false);
+            const [showSettings, setShowSettings] = useState(false);
+            const [isEditing, setIsEditing] = useState(false);
+
+            const [newLoan, setNewLoan] = useState({ 
+                name: '', amount: '', isEmi: false, installments: '12', note: '', 
+                longNote: '', customEmiAmount: '', date: new Date().toISOString().split('T')[0],
+                category: 'receivable'
+            });
+            const [newTransaction, setNewTransaction] = useState({ amount: '', note: '', monthIndex: null });
+
+            useEffect(() => {
+                localStorage.setItem('fintracker_v5_local', JSON.stringify(debts));
+            }, [debts]);
+
+            const statsSummary = useMemo(() => {
+                let recTotal = 0, recRecvd = 0;
+                let payTotal = 0, payPaid = 0;
+                debts.forEach(d => {
+                    (d.loans || []).forEach(l => {
+                        const s = calculateLoanStats(l);
+                        if (d.category === 'payable') { payTotal += l.amount; payPaid += s.paidAmount; }
+                        else { recTotal += l.amount; recRecvd += s.paidAmount; }
+                    });
+                });
+                return { receivableDue: recTotal - recRecvd, payableDue: payTotal - payPaid };
+            }, [debts]);
+
+            const selectedFriend = debts.find(d => d.id === selectedDebtId);
+
+            const friendTotals = useMemo(() => {
+                if (!selectedFriend) return { totalLent: 0, totalReceived: 0, remaining: 0, standardDue: 0, emiDue: 0, emiTotal: 0 };
+                let totalLent = 0, totalReceived = 0, standardDue = 0, emiDue = 0, emiTotal = 0;
+                (selectedFriend.loans || []).forEach(loan => {
+                    const stats = calculateLoanStats(loan);
+                    totalLent += loan.amount;
+                    totalReceived += stats.paidAmount;
+                    if (loan.isEmi) { emiTotal += loan.amount; emiDue += stats.remaining; }
+                    else { standardDue += stats.remaining; }
+                });
+                return { totalLent, totalReceived, remaining: standardDue + emiDue, standardDue, emiDue, emiTotal };
+            }, [selectedFriend]);
+
+            const handleCreateFriend = (e) => {
+                e.preventDefault();
+                const updated = [...debts, {
+                    id: Date.now().toString(),
+                    name: newLoan.name,
+                    category: newLoan.category,
+                    loans: [{
+                        id: 'l-' + Date.now().toString(),
+                        amount: parseFloat(newLoan.amount),
+                        isEmi: newLoan.isEmi,
+                        installments: newLoan.isEmi ? parseInt(newLoan.installments) : null,
+                        customEmiAmount: newLoan.isEmi ? parseFloat(newLoan.customEmiAmount) : null,
+                        payments: [],
+                        note: newLoan.note || (newLoan.category === 'receivable' ? 'Lent' : 'Borrowed'),
+                        longNote: newLoan.longNote || '',
+                        date: newLoan.date
+                    }]
+                }];
+                setDebts(updated);
+                setNewLoan({ name: '', amount: '', isEmi: false, installments: '12', note: '', longNote: '', customEmiAmount: '', date: new Date().toISOString().split('T')[0], category: activeTab });
+                setShowAddDebt(false);
+            };
+
+            const handleAddOrEditLoan = (e) => {
+                e.preventDefault();
+                const loanData = {
+                    amount: parseFloat(newLoan.amount),
+                    isEmi: newLoan.isEmi,
+                    installments: newLoan.isEmi ? parseInt(newLoan.installments) : null,
+                    customEmiAmount: newLoan.isEmi ? parseFloat(newLoan.customEmiAmount) : null,
+                    note: newLoan.note || (newLoan.isEmi ? 'EMI Plan' : 'Transaction'),
+                    longNote: newLoan.longNote || '',
+                    date: newLoan.date
+                };
+                const updated = debts.map(f => f.id === selectedDebtId ? {
+                    ...f, loans: isEditing 
+                        ? (f.loans || []).map(l => l.id === selectedLoanId ? { ...l, ...loanData } : l)
+                        : [...(f.loans || []), { id: 'l-' + Date.now().toString(), ...loanData, payments: [] }]
+                } : f);
+                setDebts(updated);
+                setIsEditing(false);
+                setNewLoan({ name: '', amount: '', isEmi: false, installments: '12', note: '', longNote: '', customEmiAmount: '', date: new Date().toISOString().split('T')[0], category: activeTab });
+                setShowAddLoan(false);
+            };
+
+            const openEditModal = (loan) => {
+                setSelectedLoanId(loan.id);
+                setNewLoan({ name: selectedFriend.name, amount: loan.amount, isEmi: loan.isEmi, installments: loan.installments || '12', note: loan.note, longNote: loan.longNote || '', customEmiAmount: loan.customEmiAmount || '', date: loan.date, category: selectedFriend.category });
+                setIsEditing(true);
+                setShowAddLoan(true);
+            };
+
+            const handleAddPayment = (e) => {
+                e.preventDefault();
+                const updated = debts.map(f => f.id === selectedDebtId ? {
+                    ...f, loans: (f.loans || []).map(l => l.id === selectedLoanId ? {
+                        ...l, payments: [{ id: Date.now().toString(), amount: parseFloat(newTransaction.amount), note: newTransaction.note, date: new Date().toISOString().split('T')[0], monthIndex: newTransaction.monthIndex }, ...(l.payments || [])]
+                    } : l)
+                } : f);
+                setDebts(updated);
+                setNewTransaction({ amount: '', note: '', monthIndex: null });
+                setShowAddPayment(false);
+            };
+
+            const exportData = () => {
+                const dataStr = JSON.stringify(debts, null, 2);
+                const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+                const link = document.createElement('a');
+                link.setAttribute('href', dataUri);
+                link.setAttribute('download', `FinTracker_Backup_${new Date().toISOString().split('T')[0]}.json`);
+                link.click();
+            };
+
+            const importData = (event) => {
+                const reader = new FileReader();
+                reader.readAsText(event.target.files[0], "UTF-8");
+                reader.onload = e => {
+                    try {
+                        const json = JSON.parse(e.target.result);
+                        if (confirm('Import backup? This replaces existing data.')) {
+                            setDebts(json);
+                            setShowSettings(false);
+                        }
+                    } catch (err) { alert('Invalid backup.'); }
+                };
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+                    <nav className="bg-slate-900/80 backdrop-blur-xl border-b border-slate-800 sticky top-0 z-40 shrink-0">
+                        <div className="max-w-7xl mx-auto px-6 h-16 sm:h-20 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-orange-600 p-2 rounded-xl shadow-lg shadow-orange-900/20"><Icon name="Wallet" className="text-white" size={24} /></div>
+                                <h1 className="font-black text-xl sm:text-2xl tracking-tighter text-white">FinTracker</h1>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <button onClick={() => setShowSettings(true)} className="p-2.5 text-slate-400 hover:text-white transition-all bg-slate-800/50 rounded-xl border border-slate-700"><Icon name="Settings" size={20} /></button>
+                                {view === 'list' && (
+                                    <button onClick={() => { setIsEditing(false); setNewLoan(prev => ({...prev, category: activeTab})); setShowAddDebt(true); }} className="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-xs sm:text-sm font-black uppercase tracking-widest flex items-center gap-2 hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20"><Icon name="Plus" size={18} /> Add Entry</button>
+                                )}
+                            </div>
+                        </div>
+                    </nav>
+
+                    <main className="max-w-7xl mx-auto w-full px-6 py-8 flex-grow">
+                        {view === 'list' ? (
+                            <div className="space-y-8 animate-slide-up">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="bg-slate-900/50 p-8 rounded-[2rem] border border-blue-500/20 shadow-2xl flex items-center justify-between group hover:border-blue-500/40 transition-all">
+                                        <div className="space-y-1"><p className="text-xs uppercase font-black text-blue-500 tracking-[0.2em]">Receivables</p><p className="text-4xl font-black text-slate-100 tracking-tighter">{CURRENCY}{statsSummary.receivableDue.toLocaleString('en-IN')}</p></div>
+                                        <div className="p-4 bg-blue-500/10 rounded-2xl text-blue-500 group-hover:scale-110 transition-transform"><Icon name="TrendingUp" size={32} /></div>
+                                    </div>
+                                    <div className="bg-slate-900/50 p-8 rounded-[2rem] border border-rose-500/20 shadow-2xl flex items-center justify-between group hover:border-rose-500/40 transition-all">
+                                        <div className="space-y-1"><p className="text-xs uppercase font-black text-rose-500 tracking-[0.2em]">Payables</p><p className="text-4xl font-black text-slate-100 tracking-tighter">{CURRENCY}{statsSummary.payableDue.toLocaleString('en-IN')}</p></div>
+                                        <div className="p-4 bg-rose-500/10 rounded-2xl text-rose-500 group-hover:scale-110 transition-transform"><Icon name="TrendingDown" size={32} /></div>
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-col md:flex-row gap-4">
+                                    <div className="flex bg-slate-900 p-1.5 rounded-2xl border border-slate-800 w-full md:w-80">
+                                        <button onClick={() => setActiveTab('receivable')} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'receivable' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-400'}`}>Receivables</button>
+                                        <button onClick={() => setActiveTab('payable')} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'payable' ? 'bg-rose-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-400'}`}>Payables</button>
+                                    </div>
+                                    <div className="relative flex-grow">
+                                        <Icon name="Search" className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-500" size={20} />
+                                        <input type="text" placeholder={`Search for a person in ${activeTab}s...`} className="w-full pl-14 pr-6 py-4 bg-slate-900 border border-slate-800 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 shadow-sm text-slate-100 placeholder-slate-600 font-medium" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                    {debts.filter(d => d.category === activeTab && d.name.toLowerCase().includes(searchTerm.toLowerCase())).map(friend => {
+                                        let friendOwed = 0; (friend.loans || []).forEach(l => { friendOwed += calculateLoanStats(l).remaining; });
+                                        return (
+                                            <button key={friend.id} onClick={() => { setSelectedDebtId(friend.id); setView('detail'); }} className="bg-slate-900 p-8 rounded-[2rem] border border-slate-800 shadow-sm flex flex-col items-start gap-6 group active:scale-[0.98] hover:border-slate-600 hover:bg-slate-800/40 transition-all text-left">
+                                                <div className="flex items-center gap-4 w-full">
+                                                    <div className={`w-14 h-14 bg-slate-800 rounded-[1.2rem] flex items-center justify-center ${friend.category === 'payable' ? 'text-rose-400 group-hover:bg-rose-500/10' : 'text-blue-400 group-hover:bg-blue-500/10'} transition-all`}><Icon name="User" size={28} /></div>
+                                                    <div className="flex-grow"><h3 className="font-black text-slate-100 text-xl leading-tight mb-1">{friend.name}</h3><p className="text-[10px] text-slate-500 font-black uppercase tracking-widest">{(friend.loans || []).length} active records</p></div>
+                                                    <Icon name="ChevronRight" className="text-slate-600 group-hover:text-blue-400 group-hover:translate-x-1 transition-all" size={20} />
+                                                </div>
+                                                <div className="w-full pt-4 border-t border-slate-800 flex justify-between items-end">
+                                                    <div><p className="text-[9px] text-slate-500 font-black uppercase tracking-widest mb-1">Balance Due</p><p className="font-black text-white text-3xl tracking-tighter">{CURRENCY}{friendOwed.toLocaleString('en-IN')}</p></div>
+                                                </div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                {debts.filter(d => d.category === activeTab).length === 0 && (
+                                    <div className="text-center py-32 text-slate-700 bg-slate-900/20 rounded-[3rem] border-2 border-dashed border-slate-800/50">
+                                        <Icon name="Inbox" size={64} className="mx-auto mb-6 opacity-10" /><p className="text-lg font-bold uppercase tracking-[0.2em] opacity-40">No entries in {activeTab}s</p>
+                                    </div>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="space-y-8 animate-slide-up pb-20">
+                                <div className="flex items-center justify-between">
+                                    <button onClick={() => setView('list')} className="bg-slate-900 border border-slate-800 px-6 py-3 rounded-2xl text-[10px] font-black uppercase tracking-[0.1em] flex items-center gap-3 text-slate-400 hover:text-white transition-all shadow-sm hover:bg-slate-800"><Icon name="ArrowLeft" size={16} /> Dashboard</button>
+                                    <button onClick={() => { if(confirm(`Erase all records for ${selectedFriend?.name}?`)) { setDebts(debts.filter(d => d.id !== selectedDebtId)); setView('list'); }}} className="p-3 text-rose-500/50 hover:text-rose-500 transition-all bg-slate-900 rounded-2xl border border-slate-800 hover:border-rose-500/20"><Icon name="Trash2" size={20} /></button>
+                                </div>
+
+                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                                    <div className="lg:col-span-1 space-y-6">
+                                        <div className="bg-slate-900 p-10 rounded-[3rem] border border-slate-800 text-center shadow-2xl relative overflow-hidden h-fit">
+                                            <div className={`w-24 h-24 bg-slate-800 rounded-[2rem] flex items-center justify-center mx-auto mb-6 shadow-inner border border-slate-700 ${selectedFriend?.category === 'payable' ? 'text-rose-400' : 'text-blue-400'}`}><Icon name="User" size={40} /></div>
+                                            <h2 className="text-3xl font-black text-white mb-2 tracking-tight">{selectedFriend?.name}</h2>
+                                            <p className={`text-[10px] font-black uppercase tracking-[0.3em] mb-10 ${selectedFriend?.category === 'payable' ? 'text-rose-500' : 'text-blue-500'}`}>{selectedFriend?.category === 'payable' ? 'Payable Account' : 'Receivable Account'}</p>
+                                            <div className="space-y-4">
+                                                <div className="flex justify-between items-center p-5 bg-slate-950/50 rounded-2xl border border-slate-800"><p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">{selectedFriend?.category === 'payable' ? 'Total Borrowed' : 'Total Lent'}</p><p className="font-black text-xl text-white">{CURRENCY}{friendTotals.totalLent.toLocaleString('en-IN')}</p></div>
+                                                <div className="flex justify-between items-center p-5 bg-slate-950/50 rounded-2xl border border-slate-800"><p className="text-[10px] font-black uppercase text-emerald-500 tracking-widest">{selectedFriend?.category === 'payable' ? 'Total Paid' : 'Total Received'}</p><p className="font-black text-xl text-emerald-400">{CURRENCY}{friendTotals.totalReceived.toLocaleString('en-IN')}</p></div>
+                                            </div>
+                                            <div className={`mt-10 grid gap-4 border-t border-slate-800 pt-8 ${selectedFriend?.category === 'payable' ? 'grid-cols-2' : 'grid-cols-2'}`}>
+                                                {selectedFriend?.category === 'receivable' ? (
+                                                    <div className="text-left"><p className="text-[8px] font-black uppercase text-slate-500 mb-1">Standard Due</p><p className="font-black text-sm text-blue-400">{CURRENCY}{friendTotals.standardDue.toLocaleString('en-IN')}</p></div>
+                                                ) : (
+                                                    <div className="text-left"><p className="text-[8px] font-black uppercase text-slate-500 mb-1">EMI Total Value</p><p className="font-black text-sm text-purple-400/70">{CURRENCY}{friendTotals.emiTotal.toLocaleString('en-IN')}</p></div>
+                                                )}
+                                                <div className="text-right"><p className="text-[8px] font-black uppercase text-purple-400 mb-1">EMI Due</p><p className="font-black text-sm text-purple-400">{CURRENCY}{friendTotals.emiDue.toLocaleString('en-IN')}</p></div>
+                                            </div>
+                                            <div className="mt-6 p-6 bg-orange-600/10 rounded-3xl border-2 border-orange-600/20"><p className="text-xs font-black uppercase text-orange-500 mb-1 tracking-widest">Net Balance Due</p><p className="font-black text-4xl text-white tracking-tighter">{CURRENCY}{friendTotals.remaining.toLocaleString('en-IN')}</p></div>
+                                        </div>
+                                    </div>
+
+                                    <div className="lg:col-span-2 space-y-6">
+                                        <button onClick={() => { setIsEditing(false); setShowAddLoan(true); }} className={`w-full py-5 text-white rounded-[2rem] font-black uppercase text-sm tracking-[0.2em] flex items-center justify-center gap-4 shadow-2xl transition-all hover:scale-[1.01] active:scale-[0.99] ${selectedFriend?.category === 'payable' ? 'bg-rose-600' : 'bg-blue-600'}`}><Icon name="Plus" size={20} /> Add New Transaction</button>
+                                        <div className="grid grid-cols-1 gap-6">
+                                            {(selectedFriend?.loans || []).map(loan => {
+                                                const stats = calculateLoanStats(loan);
+                                                const schedule = getEMISchedule(loan);
+                                                const lumpsumPayments = (loan.payments || []).filter(p => p.monthIndex === null || p.monthIndex === undefined);
+                                                const lumpsumTotal = lumpsumPayments.reduce((acc, p) => acc + p.amount, 0);
+                                                
+                                                return (
+                                                    <div key={loan.id} className={`bg-slate-900 border rounded-[2.5rem] overflow-hidden transition-all shadow-xl ${stats.isPaid ? 'border-emerald-900/50' : 'border-slate-800'}`}>
+                                                        <div className="p-10">
+                                                            <div className="flex justify-between items-start mb-8">
+                                                                <div className="space-y-2">
+                                                                    <div className="flex items-center gap-3"><span className={`text-[10px] font-black uppercase px-3 py-1 rounded-lg ${loan.isEmi ? 'bg-purple-900/30 text-purple-400' : (selectedFriend.category === 'payable' ? 'bg-rose-900/30 text-rose-400' : 'bg-blue-900/30 text-blue-400')}`}>{loan.isEmi ? 'EMI PLAN' : (selectedFriend.category === 'payable' ? 'DIRECT PAYABLE' : 'DIRECT RECEIVABLE')}</span><span className="text-xs text-slate-500 font-bold">{loan.date}</span></div>
+                                                                    <h4 className="font-black text-white text-2xl tracking-tight leading-none">{loan.note}</h4>
+                                                                    {loan.longNote && <p className="text-sm text-slate-400 whitespace-pre-wrap mt-2 border-l-2 border-slate-800 pl-4">{loan.longNote}</p>}
+                                                                </div>
+                                                                <div className="flex gap-2">
+                                                                    <button onClick={() => openEditModal(loan)} className="text-slate-500 p-3 bg-slate-800 rounded-2xl hover:text-blue-400 transition-colors"><Icon name="Edit3" size={20} /></button>
+                                                                    <button onClick={() => {if(confirm('Delete record?')) setDebts(debts.map(f => f.id === selectedDebtId ? {...f, loans: f.loans.filter(l => l.id !== loan.id)} : f))} } className="text-slate-500 p-3 bg-slate-800 rounded-2xl hover:text-rose-500 transition-colors"><Icon name="Trash2" size={20} /></button>
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="grid grid-cols-2 gap-10 mb-10">
+                                                                <div><p className="text-[10px] font-black uppercase text-slate-500 mb-1 tracking-widest">Principal</p><p className="font-black text-3xl tracking-tighter text-white">{CURRENCY}{loan.amount.toLocaleString('en-IN')}</p></div>
+                                                                <div className="text-right"><p className="text-[10px] font-black uppercase text-slate-500 mb-1 tracking-widest">Remaining</p><p className={`font-black text-3xl tracking-tighter ${stats.isPaid ? 'text-emerald-400' : 'text-orange-400'}`}>{CURRENCY}{stats.remaining.toLocaleString('en-IN')}</p></div>
+                                                            </div>
+
+                                                            <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden shadow-inner mb-2"><div className={`h-full transition-all duration-1000 ${stats.isPaid ? 'bg-emerald-500' : (selectedFriend.category === 'payable' ? 'bg-rose-600' : 'bg-blue-600')}`} style={{ width: `${stats.progress}%` }} /></div>
+                                                            <div className="flex justify-between items-center mb-10"><p className="text-[9px] font-black uppercase text-slate-600 tracking-widest">{loan.payments.length} total payments</p><p className="text-[9px] font-black uppercase text-slate-600 tracking-widest">{Math.round(stats.progress)}% Settled</p></div>
+                                                            
+                                                            {loan.isEmi && (
+                                                                <div className="space-y-8">
+                                                                    <div className="glass-panel rounded-[2rem] p-8 space-y-6">
+                                                                        <div className="flex justify-between items-center">
+                                                                            <div className="flex items-center gap-3 text-purple-400"><Icon name="Calendar" size={20} /><p className="text-[11px] font-black uppercase tracking-[0.2em]">Monthly Ledger</p></div>
+                                                                            <div className="flex items-center gap-3">
+                                                                                <p className="text-[11px] font-black uppercase bg-slate-900 border border-purple-500/30 text-purple-400 px-4 py-2 rounded-xl">Target: {CURRENCY}{stats.emiInfo.monthly}</p>
+                                                                                {!stats.isPaid && <button onClick={() => { setSelectedLoanId(loan.id); setNewTransaction({ amount: '', note: 'Lumpsum Payment' }); setShowAddPayment(true); }} className="text-[11px] font-black uppercase bg-slate-800 border border-slate-700 text-white px-4 py-2 rounded-xl hover:bg-slate-700 transition-colors">Lumpsum</button>}
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                                                                            {schedule.map(slot => (
+                                                                                <div key={slot.index} className="flex justify-between items-center bg-slate-950/40 p-4 rounded-2xl border border-slate-800 transition-all hover:bg-slate-950/60">
+                                                                                    <div className="flex items-center gap-4"><div className={`w-3 h-3 rounded-full ${slot.status === 'paid' ? 'bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)]' : slot.status === 'pending' ? 'bg-rose-500 animate-pulse shadow-[0_0_12px_rgba(244,63,94,0.4)]' : slot.status === 'partial' ? 'bg-amber-400' : 'bg-slate-700'}`} /><span className="text-xs font-bold text-slate-300">{slot.monthName}</span></div>
+                                                                                    <div className="flex items-center gap-3">{slot.totalPaid > 0 && <span className="text-xs font-black text-emerald-400">{CURRENCY}{slot.totalPaid.toLocaleString('en-IN')}</span>}{slot.status !== 'paid' && <button onClick={() => { setSelectedLoanId(loan.id); setNewTransaction({ amount: (slot.targetAmount - slot.totalPaid).toFixed(2), note: `EMI: ${slot.monthName}`, monthIndex: slot.index }); setShowAddPayment(true); }} className="text-[10px] font-black uppercase bg-purple-600 text-white px-4 py-2 rounded-xl transition-all hover:bg-purple-500 text-xs">{selectedFriend.category === 'payable' ? 'Paid' : 'Received'}</button>}</div>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                    
+                                                                    {/* Lumpsum History Section with Total Display */}
+                                                                    {lumpsumPayments.length > 0 && (
+                                                                        <div className="glass-panel rounded-[2rem] p-8 space-y-4">
+                                                                            <div className="flex justify-between items-center text-emerald-400">
+                                                                                <div className="flex items-center gap-3">
+                                                                                    <Icon name="History" size={20} />
+                                                                                    <p className="text-[11px] font-black uppercase tracking-[0.2em]">Lumpsum History</p>
+                                                                                </div>
+                                                                                <p className="text-[11px] font-black uppercase bg-emerald-500/10 text-emerald-400 px-3 py-1 rounded-lg">
+                                                                                    Total: {CURRENCY}{lumpsumTotal.toLocaleString('en-IN')}
+                                                                                </p>
+                                                                            </div>
+                                                                            <div className="space-y-2">
+                                                                                {lumpsumPayments.map(p => (
+                                                                                    <div key={p.id} className="flex justify-between items-center bg-slate-950/40 p-4 rounded-xl border border-slate-800">
+                                                                                        <div className="text-left">
+                                                                                            <p className="text-xs font-black text-slate-200">{CURRENCY}{p.amount.toLocaleString('en-IN')}</p>
+                                                                                            <p className="text-[9px] text-slate-500 font-bold uppercase">{p.note || 'Lumpsum'}</p>
+                                                                                        </div>
+                                                                                        <p className="text-[10px] text-slate-500 font-black">{p.date}</p>
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                            {!loan.isEmi && !stats.isPaid && <button onClick={() => { setSelectedLoanId(loan.id); setNewTransaction({ amount: '', note: '' }); setShowAddPayment(true); }} className={`w-full mt-6 py-4 text-white rounded-[1.5rem] font-black text-xs uppercase tracking-widest shadow-2xl transition-all hover:brightness-110 ${selectedFriend.category === 'payable' ? 'bg-rose-600 shadow-rose-900/10' : 'bg-blue-600 shadow-blue-900/10'}`}>{selectedFriend.category === 'payable' ? 'Log Payment' : 'Log Payment'}</button>}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Modals */}
+                    {(showAddDebt || showAddLoan) && (
+                        <div className="fixed inset-0 z-50 modal-overlay">
+                            <div className="bg-slate-900 w-full max-w-lg rounded-[3rem] shadow-2xl animate-slide-up border border-slate-800 modal-container p-10 mx-auto my-auto">
+                                <div className="shrink-0 mb-6"><h2 className="text-3xl font-black text-white tracking-tight">{isEditing ? 'Edit Transaction' : (showAddDebt ? 'Create Account' : 'Add New Record')}</h2></div>
+                                <div className="modal-body hide-scrollbar">
+                                    <form id="entryForm" onSubmit={showAddDebt ? handleCreateFriend : handleAddOrEditLoan} className="space-y-6">
+                                        {showAddDebt && !isEditing && (
+                                            <div className="space-y-6">
+                                                <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Entry Category</label><div className="flex bg-slate-950 p-2 rounded-2xl border border-slate-800"><button type="button" onClick={() => setNewLoan({...newLoan, category: 'receivable'})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${newLoan.category === 'receivable' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-slate-400'}`}>Receivable</button><button type="button" onClick={() => setNewLoan({...newLoan, category: 'payable'})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${newLoan.category === 'payable' ? 'bg-rose-600 text-white' : 'text-slate-500 hover:text-slate-400'}`}>Payable</button></div></div>
+                                                <div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Person's Name</label><input type="text" required className="w-full px-5 py-4 bg-slate-800 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-bold text-white shadow-inner" placeholder="e.g. Michael Jenkins" value={newLoan.name} onChange={(e) => setNewLoan({...newLoan, name: e.target.value})} /></div>
+                                            </div>
+                                        )}
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Amount ({CURRENCY})</label><input type="number" required className="w-full px-5 py-4 bg-slate-800 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-black text-2xl text-white shadow-inner" value={newLoan.amount} onChange={(e) => { const val = e.target.value; const suggested = val ? (val / (parseInt(newLoan.installments) || 12)).toFixed(2) : ''; setNewLoan({...newLoan, amount: val, customEmiAmount: suggested}); }} /></div>
+                                            <div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Date</label><input type="date" required className="w-full px-5 py-4 bg-slate-800 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-bold text-xs text-white shadow-inner" value={newLoan.date} onChange={(e) => setNewLoan({...newLoan, date: e.target.value})} /></div>
+                                        </div>
+                                        <div className="space-y-4">
+                                            <div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Reason / Transaction Name</label><input type="text" className="w-full px-5 py-4 bg-slate-800 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-bold text-white placeholder-slate-600" placeholder="e.g. Purchase" value={newLoan.note} onChange={(e) => setNewLoan({...newLoan, note: e.target.value})} /></div>
+                                            <div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Detailed Notes</label><textarea className="w-full px-5 py-4 bg-slate-800 border-none rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium text-white placeholder-slate-600 resize-none h-24" value={newLoan.longNote} onChange={(e) => setNewLoan({...newLoan, longNote: e.target.value})} /></div>
+                                        </div>
+                                        <div className="p-6 bg-slate-950 rounded-3xl border border-slate-800">
+                                            <label className="flex items-center justify-between cursor-pointer group"><div className="flex items-center gap-3"><Icon name="CalendarCheck" className="text-purple-500" /><span className="font-black text-xs text-slate-300 uppercase tracking-widest">Enable EMI Mode</span></div><input type="checkbox" className="w-6 h-6 rounded-lg text-purple-600" checked={newLoan.isEmi} onChange={(e) => { const ck = e.target.checked; setNewLoan({...newLoan, isEmi: ck, customEmiAmount: ck ? (newLoan.amount / 12).toFixed(2) : ''}); }} /></label>
+                                            {newLoan.isEmi && (
+                                                <div className="mt-6 pt-6 border-t border-slate-800 space-y-4 animate-slide-up">
+                                                    <div className="flex items-center justify-between"><label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Duration</label><select className="bg-slate-900 border border-slate-700 text-white rounded-xl px-4 py-2 text-xs font-black outline-none" value={newLoan.installments} onChange={(e) => setNewLoan({...newLoan, installments: e.target.value, customEmiAmount: (newLoan.amount / e.target.value).toFixed(2)})}>{[3, 6, 9, 12, 18, 24, 36, 48].map(n => <option key={n} value={n}>{n} Months</option>)}</select></div>
+                                                    <div className="space-y-1"><label className="text-[10px] font-black uppercase text-purple-500 px-1 tracking-widest">Manual EMI Amount ({CURRENCY})</label><input type="number" className="w-full px-5 py-3 bg-slate-900 border-2 border-purple-500/20 rounded-2xl outline-none focus:border-purple-500 font-black text-xl text-purple-400" value={newLoan.customEmiAmount} onChange={(e) => setNewLoan({...newLoan, customEmiAmount: e.target.value})} /></div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </form>
+                                </div>
+                                <div className="flex gap-4 pt-8 shrink-0 border-t border-slate-800/50 mt-2">
+                                    <button type="button" onClick={() => { setShowAddDebt(false); setShowAddLoan(false); setIsEditing(false); }} className="flex-1 py-5 bg-slate-800 text-slate-400 font-black rounded-2xl text-[10px] uppercase tracking-widest hover:bg-slate-700 hover:text-white transition-all">Cancel</button>
+                                    <button type="submit" form="entryForm" className={`flex-1 py-5 text-white font-black rounded-2xl text-[10px] uppercase tracking-widest shadow-2xl transition-all hover:scale-[1.02] active:scale-[0.98] ${(showAddDebt ? newLoan.category === 'payable' : selectedFriend.category === 'payable') ? 'bg-rose-600 shadow-rose-900/20' : 'bg-blue-600 shadow-blue-900/20'}`}>{isEditing ? 'Update Changes' : 'Confirm Entry'}</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showAddPayment && (
+                        <div className="fixed inset-0 z-50 modal-overlay">
+                            <div className="bg-slate-900 w-full max-w-md rounded-[3rem] p-10 shadow-2xl animate-slide-up border border-slate-800 mx-auto my-auto">
+                                <h2 className="text-2xl font-black text-white mb-8 tracking-tight">{selectedFriend?.category === 'payable' ? 'Record Payment' : 'Log Payment'}</h2>
+                                <form onSubmit={handleAddPayment} className="space-y-6">
+                                    <div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Transaction Amount</label><input type="number" autoFocus required className="w-full px-6 py-6 bg-slate-800 border-none rounded-3xl outline-none focus:ring-4 focus:ring-emerald-500/10 focus:bg-slate-700 font-black text-4xl text-white tracking-tighter" value={newTransaction.amount} onChange={(e) => setNewTransaction({...newTransaction, amount: e.target.value})} /></div>
+                                    <div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Reference / Mode</label><input type="text" className="w-full px-6 py-4 bg-slate-800 border-none rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500 font-bold text-white placeholder-slate-600" placeholder="e.g. GPay / Cash" value={newTransaction.note} onChange={(e) => setNewTransaction({...newTransaction, note: e.target.value})} /></div>
+                                    <div className="flex gap-4 pt-6"><button type="button" onClick={() => setShowAddPayment(false)} className="flex-1 py-5 bg-slate-800 text-slate-400 font-black rounded-2xl text-[10px] uppercase tracking-widest hover:text-white transition-all">Cancel</button><button type="submit" className="flex-1 py-5 bg-emerald-600 text-white font-black rounded-2xl text-[10px] uppercase tracking-widest shadow-xl shadow-emerald-900/20 hover:bg-emerald-500">Log Payment</button></div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {showSettings && (
+                        <div className="fixed inset-0 z-50 modal-overlay">
+                            <div className="bg-slate-900 w-full max-w-md rounded-[3rem] p-10 shadow-2xl animate-slide-up border border-slate-800 text-center mx-auto my-auto">
+                                <Icon name="Database" size={48} className="mx-auto mb-6 text-slate-600 opacity-50" /><h2 className="text-2xl font-black text-white mb-8 tracking-tight">Data Management</h2>
+                                <div className="space-y-4">
+                                    <button onClick={exportData} className="w-full flex items-center justify-between p-6 bg-slate-800/50 border border-slate-800 rounded-3xl group transition-all hover:bg-slate-800"><div className="flex items-center gap-4"><Icon name="Download" className="text-blue-400" size={24} /><div className="text-left"><p className="font-black text-white uppercase text-[10px] tracking-widest">Export Backup</p><p className="text-[10px] text-slate-500 font-medium italic">Save as JSON file</p></div></div><Icon name="ChevronRight" size={16} className="text-slate-600" /></button>
+                                    <label className="w-full flex items-center justify-between p-6 bg-slate-800/50 border border-slate-800 rounded-3xl group cursor-pointer hover:bg-slate-800"><div className="flex items-center gap-4"><Icon name="Upload" className="text-emerald-400" size={24} /><div className="text-left"><p className="font-black text-white uppercase text-[10px] tracking-widest">Import Backup</p><p className="text-[10px] text-slate-500 font-medium italic">Upload JSON file</p></div></div><input type="file" className="hidden" accept=".json" onChange={importData} /><Icon name="ChevronRight" size={16} className="text-slate-600" /></label>
+                                    <div className="pt-8 space-y-3"><button onClick={() => { if(confirm('⚠️ WARNING: Delete everything?')) { localStorage.removeItem('fintracker_v5_local'); setDebts([]); window.location.reload(); } }} className="w-full p-4 text-rose-500/50 hover:text-rose-500 font-black text-[10px] uppercase tracking-[0.2em] transition-all hover:bg-rose-500/5 rounded-2xl">Wipe All Local Data</button><button onClick={() => setShowSettings(false)} className="w-full py-5 bg-slate-800 text-slate-400 font-black rounded-2xl text-[10px] uppercase tracking-widest hover:text-white transition-all">Close Panel</button></div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
