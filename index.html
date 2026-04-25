@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FinTracker - Cloud Sync Fixed</title>
+    <title>FinTracker - Cloud Sync</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -12,10 +12,26 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-        body { font-family: 'Inter', sans-serif; background-color: #020617; color: #f1f5f9; margin: 0; padding: 0; }
-        .modal-overlay { backdrop-filter: blur(12px); background-color: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; position: fixed; inset: 0; z-index: 50; padding: 20px; }
-        .animate-slide-up { animation: slideUp 0.4s ease-out forwards; }
-        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: #020617; 
+            color: #f1f5f9; 
+            margin: 0; padding: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .modal-overlay { 
+            backdrop-filter: blur(12px); 
+            background-color: rgba(0,0,0,0.7); 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            position: fixed; 
+            inset: 0; 
+            z-index: 50; 
+            padding: 20px; 
+        }
+        .animate-slide-up { animation: slideUp 0.3s ease-out forwards; }
+        @keyframes slideUp { from { transform: translateY(15px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         .hide-scrollbar::-webkit-scrollbar { display: none; }
     </style>
 </head>
@@ -25,9 +41,10 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef } = React;
 
-        // --- UPDATE THESE WITH YOUR ACTUAL KEYS ---
+        // --- SUPABASE CONFIG ---
+        // REPLACE THESE WITH YOUR DASHBOARD VALUES
         const SUPABASE_URL = 'https://blwbigaexnmuensxgkde.supabase.co';
-        const SUPABASE_KEY = 'YOUR_LONG_ANON_KEY_HERE'; 
+        const SUPABASE_KEY = 'YOUR_ACTUAL_LONG_ANON_KEY_HERE'; 
         const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
         const Icon = ({ name, size = 20, className = "" }) => {
@@ -38,7 +55,8 @@
                     const icon = window.lucide.icons[name];
                     if (icon) {
                         const svg = window.lucide.createElement(icon);
-                        svg.setAttribute('width', size); svg.setAttribute('height', size);
+                        svg.setAttribute('width', size);
+                        svg.setAttribute('height', size);
                         if (className) className.split(' ').forEach(cls => cls && svg.classList.add(cls));
                         ref.current.appendChild(svg);
                     }
@@ -47,106 +65,226 @@
             return <span ref={ref} className={`inline-flex items-center justify-center ${className}`} />;
         };
 
+        const calculateLoanStats = (loan) => {
+            const paidAmount = (loan.payments || []).reduce((acc, p) => acc + p.amount, 0);
+            const remaining = Math.max(0, loan.amount - paidAmount);
+            const progress = Math.min((paidAmount / loan.amount) * 100, 100);
+            return { paidAmount, remaining, progress, isPaid: remaining <= 0.01 };
+        };
+
         const App = () => {
             const CURRENCY = "₹";
+            
+            // State
             const [debts, setDebts] = useState([]);
             const [isInitialLoad, setIsInitialLoad] = useState(true);
-            const [view, setView] = useState('list');
+            const [view, setView] = useState('list'); // 'list' or 'detail'
             const [selectedDebtId, setSelectedDebtId] = useState(null);
-            const [showAddDebt, setShowAddDebt] = useState(false);
-            const [showAddLoan, setShowAddLoan] = useState(false);
             const [activeTab, setActiveTab] = useState('receivable');
-
-            const [newLoan, setNewLoan] = useState({ 
-                name: '', amount: '', note: '', category: 'receivable', date: new Date().toISOString().split('T')[0] 
+            
+            // Modal States
+            const [showAddPersonModal, setShowAddPersonModal] = useState(false);
+            const [showAddTransactionModal, setShowAddTransactionModal] = useState(false);
+            
+            // Form States
+            const [formData, setFormData] = useState({
+                name: '',
+                amount: '',
+                note: '',
+                date: new Date().toISOString().split('T')[0],
+                category: 'receivable'
             });
 
-            // Load Data
+            // 1. Initial Load from Supabase (Sync Down)
             useEffect(() => {
-                const fetchSync = async () => {
-                    const { data } = await _supabase.from('my_data').select('content').eq('id', 1).single();
-                    if (data?.content) setDebts(JSON.parse(data.content));
-                    else {
-                        const local = localStorage.getItem('fintracker_v5_local');
-                        if (local) setDebts(JSON.parse(local));
+                const init = async () => {
+                    try {
+                        const { data, error } = await _supabase
+                            .from('my_data')
+                            .select('content')
+                            .eq('id', 1)
+                            .single();
+
+                        if (data && data.content) {
+                            setDebts(JSON.parse(data.content));
+                        } else {
+                            const local = localStorage.getItem('fintracker_v5_local');
+                            if (local) setDebts(JSON.parse(local));
+                        }
+                    } catch (e) {
+                        console.error("Load failed", e);
                     }
                     setIsInitialLoad(false);
                 };
-                fetchSync();
+                init();
             }, []);
 
-            // Save Data
+            // 2. Sync Up to Supabase on change
             useEffect(() => {
                 if (isInitialLoad) return;
-                const save = async () => {
+                const sync = async () => {
                     const str = JSON.stringify(debts);
                     localStorage.setItem('fintracker_v5_local', str);
                     await _supabase.from('my_data').upsert([{ id: 1, content: str }]);
                 };
-                const t = setTimeout(save, 500);
-                return () => clearTimeout(t);
+                const timeout = setTimeout(sync, 1000);
+                return () => clearTimeout(timeout);
             }, [debts]);
 
+            // Computed
+            const filteredDebts = debts.filter(d => d.category === activeTab);
             const selectedFriend = debts.find(d => d.id === selectedDebtId);
+
+            const totals = useMemo(() => {
+                let rec = 0, pay = 0;
+                debts.forEach(d => {
+                    const bal = (d.loans || []).reduce((acc, l) => acc + calculateLoanStats(l).remaining, 0);
+                    if (d.category === 'receivable') rec += bal;
+                    else pay += bal;
+                });
+                return { rec, pay };
+            }, [debts]);
+
+            // Handlers
+            const handleCreatePerson = (e) => {
+                e.preventDefault();
+                const newPerson = {
+                    id: 'p-' + Date.now(),
+                    name: formData.name,
+                    category: formData.category,
+                    loans: [{
+                        id: 'l-' + Date.now(),
+                        amount: parseFloat(formData.amount),
+                        note: formData.note || 'Initial',
+                        date: formData.date,
+                        payments: []
+                    }]
+                };
+                setDebts([...debts, newPerson]);
+                setShowAddPersonModal(false);
+                setFormData({ ...formData, name: '', amount: '', note: '' });
+            };
 
             const handleAddTransaction = (e) => {
                 e.preventDefault();
-                const transaction = {
+                const newLoan = {
                     id: 'l-' + Date.now(),
-                    amount: parseFloat(newLoan.amount),
-                    note: newLoan.note,
-                    date: newLoan.date,
+                    amount: parseFloat(formData.amount),
+                    note: formData.note || 'Transaction',
+                    date: formData.date,
                     payments: []
                 };
-                setDebts(debts.map(d => d.id === selectedDebtId ? { ...d, loans: [...(d.loans || []), transaction] } : d));
-                setShowAddLoan(false);
-                setNewLoan({ ...newLoan, amount: '', note: '' });
-            };
-
-            const handleCreatePerson = (e) => {
-                e.preventDefault();
-                const person = {
-                    id: Date.now().toString(),
-                    name: newLoan.name,
-                    category: newLoan.category,
-                    loans: [{ id: 'l-'+Date.now(), amount: parseFloat(newLoan.amount), note: 'Initial', date: newLoan.date, payments: [] }]
-                };
-                setDebts([...debts, person]);
-                setShowAddDebt(false);
+                setDebts(debts.map(d => d.id === selectedDebtId ? { ...d, loans: [...(d.loans || []), newLoan] } : d));
+                setShowAddTransactionModal(false);
+                setFormData({ ...formData, amount: '', note: '' });
             };
 
             return (
-                <div className="min-h-screen bg-slate-950 text-slate-100">
-                    <nav className="p-6 border-b border-slate-800 flex justify-between items-center sticky top-0 bg-slate-950/80 backdrop-blur-md z-40">
-                        <h1 className="font-black text-xl tracking-tighter italic">FIN<span className="text-blue-500">TRACKER</span></h1>
-                        {view === 'list' && <button onClick={() => setShowAddDebt(true)} className="bg-blue-600 px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest">Add Person</button>}
+                <div className="min-h-screen flex flex-col">
+                    {/* Nav */}
+                    <nav className="p-6 border-b border-slate-800 flex justify-between items-center sticky top-0 bg-slate-950/90 backdrop-blur-md z-40">
+                        <div className="flex items-center gap-2">
+                            <div className="bg-blue-600 p-1.5 rounded-lg"><Icon name="Wallet" size={18} className="text-white" /></div>
+                            <h1 className="font-black text-xl tracking-tighter italic">FIN<span className="text-blue-500">TRACKER</span></h1>
+                        </div>
+                        {view === 'list' && (
+                            <button 
+                                onClick={() => { setFormData({...formData, category: activeTab}); setShowAddPersonModal(true); }}
+                                className="bg-blue-600 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white"
+                            >
+                                Add Person
+                            </button>
+                        )}
                     </nav>
 
-                    <main className="p-6 max-w-4xl mx-auto">
+                    <main className="p-6 max-w-4xl mx-auto w-full flex-grow">
                         {view === 'list' ? (
-                            <div className="space-y-6">
-                                <div className="flex gap-2 bg-slate-900 p-1 rounded-xl">
-                                    <button onClick={() => setActiveTab('receivable')} className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest ${activeTab === 'receivable' ? 'bg-blue-600' : 'text-slate-500'}`}>Receivables</button>
-                                    <button onClick={() => setActiveTab('payable')} className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest ${activeTab === 'payable' ? 'bg-rose-600' : 'text-slate-500'}`}>Payables</button>
-                                </div>
-                                {debts.filter(d => d.category === activeTab).map(f => (
-                                    <div key={f.id} onClick={() => { setSelectedDebtId(f.id); setView('detail'); }} className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
-                                        <p className="text-xs font-bold text-slate-500 uppercase">{f.name}</p>
-                                        <p className="text-2xl font-black">{CURRENCY}{(f.loans || []).reduce((s, l) => s + l.amount, 0).toLocaleString()}</p>
+                            <div className="space-y-8 animate-slide-up">
+                                {/* Header Cards */}
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="bg-slate-900/50 p-6 rounded-3xl border border-blue-500/20">
+                                        <p className="text-[10px] font-black uppercase text-blue-500 mb-1">Receivables</p>
+                                        <p className="text-2xl font-black">{CURRENCY}{totals.rec.toLocaleString()}</p>
                                     </div>
-                                ))}
+                                    <div className="bg-slate-900/50 p-6 rounded-3xl border border-rose-500/20">
+                                        <p className="text-[10px] font-black uppercase text-rose-500 mb-1">Payables</p>
+                                        <p className="text-2xl font-black">{CURRENCY}{totals.pay.toLocaleString()}</p>
+                                    </div>
+                                </div>
+
+                                {/* Tabs */}
+                                <div className="flex bg-slate-900 p-1 rounded-2xl border border-slate-800">
+                                    <button onClick={() => setActiveTab('receivable')} className={`flex-1 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'receivable' ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>Receivables</button>
+                                    <button onClick={() => setActiveTab('payable')} className={`flex-1 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'payable' ? 'bg-rose-600 text-white' : 'text-slate-500'}`}>Payables</button>
+                                </div>
+
+                                {/* List */}
+                                <div className="grid gap-4">
+                                    {filteredDebts.map(f => {
+                                        const bal = (f.loans || []).reduce((acc, l) => acc + calculateLoanStats(l).remaining, 0);
+                                        return (
+                                            <div 
+                                                key={f.id} 
+                                                onClick={() => { setSelectedDebtId(f.id); setView('detail'); }}
+                                                className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 flex justify-between items-center group active:scale-95 transition-all"
+                                            >
+                                                <div>
+                                                    <h3 className="font-black text-lg">{f.name}</h3>
+                                                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{(f.loans || []).length} Entries</p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <p className="text-xl font-black">{CURRENCY}{bal.toLocaleString()}</p>
+                                                    <Icon name="ChevronRight" size={16} className="text-slate-700 group-hover:text-white" />
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                    {filteredDebts.length === 0 && <div className="text-center py-20 opacity-20 font-black uppercase tracking-widest text-xs">No records found</div>}
+                                </div>
                             </div>
                         ) : (
-                            <div className="space-y-6">
-                                <button onClick={() => setView('list')} className="text-slate-500 text-xs font-bold uppercase tracking-widest flex items-center gap-2"><Icon name="ArrowLeft" size={14} /> Back</button>
-                                <div className="bg-slate-900 p-8 rounded-3xl border border-slate-800">
-                                    <h2 className="text-3xl font-black mb-6">{selectedFriend?.name}</h2>
-                                    <button onClick={() => setShowAddLoan(true)} className="w-full bg-blue-600 py-4 rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg shadow-blue-900/20">Add Transaction</button>
-                                    <div className="mt-8 space-y-4">
+                            <div className="space-y-6 animate-slide-up">
+                                <button onClick={() => setView('list')} className="text-slate-500 font-black text-[10px] uppercase tracking-[0.2em] flex items-center gap-2"><Icon name="ArrowLeft" size={14} /> Back to List</button>
+                                
+                                <div className="bg-slate-900 p-8 rounded-[3rem] border border-slate-800">
+                                    <div className="flex justify-between items-start mb-8">
+                                        <div>
+                                            <h2 className="text-3xl font-black tracking-tight">{selectedFriend?.name}</h2>
+                                            <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-md ${selectedFriend?.category === 'receivable' ? 'bg-blue-500/10 text-blue-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                                {selectedFriend?.category} Account
+                                            </span>
+                                        </div>
+                                        <button 
+                                            onClick={() => { if(confirm('Delete account?')) { setDebts(debts.filter(d => d.id !== selectedDebtId)); setView('list'); }}}
+                                            className="p-3 bg-slate-800 rounded-2xl text-rose-500/50 hover:text-rose-500"
+                                        >
+                                            <Icon name="Trash2" size={18} />
+                                        </button>
+                                    </div>
+
+                                    <button 
+                                        onClick={() => setShowAddTransactionModal(true)} 
+                                        className="w-full bg-blue-600 py-5 rounded-[1.5rem] font-black uppercase text-xs tracking-[0.2em] shadow-xl shadow-blue-950/20 active:scale-95 transition-all"
+                                    >
+                                        Add New Transaction
+                                    </button>
+
+                                    <div className="mt-10 space-y-4">
                                         {(selectedFriend?.loans || []).map(l => (
-                                            <div key={l.id} className="p-4 bg-slate-950 rounded-xl border border-slate-800 flex justify-between items-center">
-                                                <div><p className="text-xs font-bold text-slate-400">{l.note}</p><p className="text-lg font-black">{CURRENCY}{l.amount.toLocaleString()}</p></div>
-                                                <p className="text-[10px] text-slate-600 font-bold">{l.date}</p>
+                                            <div key={l.id} className="p-6 bg-slate-950 rounded-[2rem] border border-slate-800 flex justify-between items-center">
+                                                <div>
+                                                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">{l.note}</p>
+                                                    <p className="text-xl font-black tracking-tight">{CURRENCY}{l.amount.toLocaleString()}</p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <p className="text-[9px] font-bold text-slate-600 mb-1">{l.date}</p>
+                                                    <button 
+                                                        onClick={() => { if(confirm('Delete record?')) setDebts(debts.map(d => d.id === selectedDebtId ? {...d, loans: d.loans.filter(x => x.id !== l.id)} : d)) }}
+                                                        className="text-slate-700 hover:text-rose-500"
+                                                    >
+                                                        <Icon name="XCircle" size={16} />
+                                                    </button>
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
@@ -155,46 +293,55 @@
                         )}
                     </main>
 
-                    {/* MODAL: ADD TRANSACTION (This was the missing part!) */}
-                    {showAddLoan && (
+                    {/* --- MODAL: ADD PERSON --- */}
+                    {showAddPersonModal && (
                         <div className="modal-overlay">
-                            <div className="bg-slate-900 p-8 rounded-[2.5rem] w-full max-w-md animate-slide-up border border-slate-800">
-                                <h2 className="text-2xl font-black mb-6">New Transaction</h2>
-                                <form onSubmit={handleAddTransaction} className="space-y-4">
+                            <div className="bg-slate-900 w-full max-w-md p-10 rounded-[3rem] border border-slate-800 animate-slide-up">
+                                <h2 className="text-2xl font-black mb-8 tracking-tight">Create Account</h2>
+                                <form onSubmit={handleCreatePerson} className="space-y-5">
                                     <div className="space-y-1">
-                                        <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Amount</label>
-                                        <input type="number" required autoFocus className="w-full p-4 bg-slate-800 rounded-xl outline-none text-white font-bold" value={newLoan.amount} onChange={e => setNewLoan({...newLoan, amount: e.target.value})} />
+                                        <label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Name</label>
+                                        <input type="text" required autoFocus className="w-full p-4 bg-slate-800 rounded-2xl outline-none font-bold" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
                                     </div>
-                                    <div className="space-y-1">
-                                        <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Reason</label>
-                                        <input type="text" placeholder="e.g. Lunch" className="w-full p-4 bg-slate-800 rounded-xl outline-none text-white font-bold" value={newLoan.note} onChange={e => setNewLoan({...newLoan, note: e.target.value})} />
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Amount</label>
+                                            <input type="number" required className="w-full p-4 bg-slate-800 rounded-2xl outline-none font-black text-xl" value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Category</label>
+                                            <select className="w-full p-4 bg-slate-800 rounded-2xl outline-none font-bold text-xs" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})}>
+                                                <option value="receivable">Receivable</option>
+                                                <option value="payable">Payable</option>
+                                            </select>
+                                        </div>
                                     </div>
-                                    <div className="flex gap-3 pt-4">
-                                        <button type="button" onClick={() => setShowAddLoan(false)} className="flex-1 py-4 bg-slate-800 rounded-xl font-bold text-xs uppercase text-slate-400">Cancel</button>
-                                        <button type="submit" className="flex-1 py-4 bg-blue-600 rounded-xl font-bold text-xs uppercase">Add Entry</button>
+                                    <div className="flex gap-4 pt-4">
+                                        <button type="button" onClick={() => setShowAddPersonModal(false)} className="flex-1 py-4 bg-slate-800 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-500">Cancel</button>
+                                        <button type="submit" className="flex-1 py-4 bg-blue-600 rounded-2xl text-[10px] font-black uppercase tracking-widest">Confirm</button>
                                     </div>
                                 </form>
                             </div>
                         </div>
                     )}
 
-                    {/* MODAL: ADD PERSON */}
-                    {showAddDebt && (
+                    {/* --- MODAL: ADD TRANSACTION --- */}
+                    {showAddTransactionModal && (
                         <div className="modal-overlay">
-                            <div className="bg-slate-900 p-8 rounded-[2.5rem] w-full max-w-md animate-slide-up border border-slate-800">
-                                <h2 className="text-2xl font-black mb-6">Create Account</h2>
-                                <form onSubmit={handleCreatePerson} className="space-y-4">
-                                    <input type="text" placeholder="Person Name" required className="w-full p-4 bg-slate-800 rounded-xl outline-none text-white font-bold" value={newLoan.name} onChange={e => setNewLoan({...newLoan, name: e.target.value})} />
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <input type="number" placeholder="Amount" required className="w-full p-4 bg-slate-800 rounded-xl outline-none text-white font-bold" value={newLoan.amount} onChange={e => setNewLoan({...newLoan, amount: e.target.value})} />
-                                        <select className="bg-slate-800 p-4 rounded-xl font-bold text-xs outline-none" value={newLoan.category} onChange={e => setNewLoan({...newLoan, category: e.target.value})}>
-                                            <option value="receivable">Receivable</option>
-                                            <option value="payable">Payable</option>
-                                        </select>
+                            <div className="bg-slate-900 w-full max-w-md p-10 rounded-[3rem] border border-slate-800 animate-slide-up">
+                                <h2 className="text-2xl font-black mb-8 tracking-tight">New Entry</h2>
+                                <form onSubmit={handleAddTransaction} className="space-y-5">
+                                    <div className="space-y-1">
+                                        <label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Amount</label>
+                                        <input type="number" required autoFocus className="w-full p-6 bg-slate-800 rounded-3xl outline-none font-black text-4xl tracking-tighter" value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} />
                                     </div>
-                                    <div className="flex gap-3 pt-4">
-                                        <button type="button" onClick={() => setShowAddDebt(false)} className="flex-1 py-4 bg-slate-800 rounded-xl font-bold text-xs uppercase text-slate-400">Cancel</button>
-                                        <button type="submit" className="flex-1 py-4 bg-blue-600 rounded-xl font-bold text-xs uppercase">Create</button>
+                                    <div className="space-y-1">
+                                        <label className="text-[10px] font-black uppercase text-slate-500 px-1 tracking-widest">Note</label>
+                                        <input type="text" placeholder="e.g. Lunch / Loan" className="w-full p-4 bg-slate-800 rounded-2xl outline-none font-bold" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} />
+                                    </div>
+                                    <div className="flex gap-4 pt-4">
+                                        <button type="button" onClick={() => setShowAddTransactionModal(false)} className="flex-1 py-4 bg-slate-800 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-500">Cancel</button>
+                                        <button type="submit" className="flex-1 py-4 bg-blue-600 rounded-2xl text-[10px] font-black uppercase tracking-widest">Add Record</button>
                                     </div>
                                 </form>
                             </div>
